@@ -290,28 +290,28 @@ async function loadAllRecords() {
     bar.style.width = '15%';
     status.textContent = 'Fetching tax codes…';
 
-    /* Tax codes fetched first — small dataset, needed to resolve rates.
-       We also probe the OpenAPI schema to discover the exact rate field name. */
-    const [taxCodesRaw, taxSchema] = await Promise.all([
+    /* Fetch tax codes and invoices together; probe one tax code record
+       using a known UUID from the first invoice to discover the rate field */
+    const [taxCodesRaw, invoices, receipts, creditNotes] = await Promise.all([
       fetchAllPages('/api4/tax-code-batch', () => {}),
-      fetchTaxSchema()
-    ]);
-    const taxRateMap = buildTaxRateMap(taxCodesRaw, taxSchema);
-    bar.style.width = '25%';
-
-    status.textContent = 'Fetching invoices, receipts & credit notes…';
-
-    const [invoices, receipts, creditNotes] = await Promise.all([
       fetchAllPages('/api4/sales-invoice-batch', (n, t) => {
-        status.textContent = `Invoices ${n}${t?'/'+t:''} · Receipts & Credit Notes loading…`;
-        if (t) bar.style.width = (25 + Math.round(n / t * 50)) + '%';
+        status.textContent = `Invoices ${n}${t?'/'+t:''} · loading…`;
+        if (t) bar.style.width = (15 + Math.round(n / t * 55)) + '%';
       }),
       fetchAllPages('/api4/receipt-batch',     () => {}),
       fetchAllPages('/api4/credit-note-batch', () => {})
     ]);
 
+    bar.style.width = '75%';
+    status.textContent = 'Resolving tax rates…';
+
+    /* Probe a single tax code record by UUID to find the exact rate field */
+    const probeResult = await probeTaxRateField(invoices);
+    const taxRateMap  = buildTaxRateMap(taxCodesRaw, probeResult);
+    bar.style.width = '100%';
+
     bar.style.width    = '100%';
-    status.textContent = `✓ ${customers.length} customers · ${invoices.length} invoices · ${receipts.length} receipts · ${creditNotes.length} credit notes · ${taxCodesRaw.length} tax codes`;
+    status.textContent = `✓ ${customers.length} customers · ${invoices.length} invoices · ${receipts.length} receipts · ${creditNotes.length} credit notes · ${taxCodesRaw.length} tax codes${probeResult ? ` · rate field: ${probeResult.candidates[0]?.path ?? 'found'}` : ''}`;
     btn.textContent    = '↺ Reload';
     btn.disabled       = false;
 
@@ -326,87 +326,126 @@ async function loadAllRecords() {
 }
 
 /* ══════════════════════════════════
-   fetchTaxSchema
-   Fetches the OpenAPI schema for tax-code-batch
+   probeTaxRateField
+   Fetches ONE known tax code by key (taken
+   from the first invoice line that has a taxCode)
    to discover which field holds the rate.
-   Returns the properties object or null on failure.
+
+   Manager.io "Single rate" tax codes in api4
+   return a structure like:
+     item.components = [{ rate: 18, ... }]
+   OR a flat:
+     item.rate = 18
+
+   We try every plausible field/path and return
+   { field, path, value } for the one that gives
+   a sensible non-zero number.
 ══════════════════════════════════ */
-async function fetchTaxSchema() {
-  try {
-    const data = await postMessageWithResponse({
-      type:'api-request', method:'GET', path:'/openapi/get-tax-code-batch.json'
-    });
-    // Navigate into the schema: items → item → properties
-    const props =
-      data?.properties?.items?.items?.properties?.item?.properties ||
-      data?.components?.schemas?.TaxCode?.properties ||
-      data?.definitions?.TaxCode?.properties ||
-      null;
-    return props;
-  } catch {
-    return null;
+async function probeTaxRateField(invoices) {
+  // Find the first invoice line that has a taxCode UUID
+  for (const inv of invoices) {
+    for (const line of (inv?.item?.lines ?? [])) {
+      if (line?.taxCode) {
+        try {
+          const data = await postMessageWithResponse({
+            type:'api-request', method:'GET',
+            path:`/api4/tax-code?key=${line.taxCode}`
+          });
+          const item = data?.item ?? data;
+          if (!item) continue;
+
+          // Collect every numeric value we can find, with its path
+          const candidates = [];
+
+          // Direct fields
+          for (const [k, v] of Object.entries(item)) {
+            if (typeof v === 'number' && v > 0 && v <= 100) {
+              candidates.push({ path: k, value: v });
+            }
+          }
+
+          // components[0] fields
+          if (Array.isArray(item.components)) {
+            for (const [ci, comp] of item.components.entries()) {
+              if (comp && typeof comp === 'object') {
+                for (const [k, v] of Object.entries(comp)) {
+                  if (typeof v === 'number' && v > 0 && v <= 100) {
+                    candidates.push({ path: `components[${ci}].${k}`, value: v });
+                  }
+                }
+              }
+            }
+          }
+
+          return { taxCodeKey: line.taxCode, item, candidates };
+        } catch { /* continue */ }
+      }
+    }
   }
+  return null;
 }
 
 /* ══════════════════════════════════
-   extractRate
-   Given a tax code item object and an optional
-   schema properties map, finds the rate field.
+   extractRateFromItem
+   Given a raw tax-code item and the probed
+   field path, extracts the effective rate.
 
-   Checks all known Manager.io field names and
-   also walks every numeric field on the item.
-
-   Compound codes: item.components[].rate summed.
-
-   Normalises decimal fractions → percent
-   (0.17 → 17, but 17 stays 17).
+   Supports:
+     • components[].{field}  — sum all components
+     • direct field on item
+     • fallback scan
 ══════════════════════════════════ */
-function extractRate(item, schemaProps) {
+function extractRateFromItem(item, probeResult) {
   if (!item) return 0;
 
-  // 1. Compound tax codes with components array
-  if (Array.isArray(item.components) && item.components.length > 0) {
-    const sum = item.components.reduce((s, c) => {
-      // Each component may also have varying field names
-      const r = c?.rate ?? c?.taxRate ?? c?.percentage ?? c?.ratePercentage ?? 0;
-      return s + Number(r);
-    }, 0);
-    if (sum !== 0) return normaliseRate(sum);
-  }
+  // Use probed path if available
+  if (probeResult?.candidates?.length > 0) {
+    // Find the best candidate: prefer 'rate' in name, then highest plausibility
+    const best = probeResult.candidates.find(c =>
+      c.path.includes('rate') || c.path.includes('Rate')
+    ) ?? probeResult.candidates[0];
 
-  // 2. Known field names, in priority order
-  const candidates = [
-    'rate', 'taxRate', 'percentage', 'ratePercentage',
-    'taxPercentage', 'percent', 'value', 'taxValue'
-  ];
-  for (const field of candidates) {
-    if (item[field] != null && Number(item[field]) !== 0) {
-      return normaliseRate(Number(item[field]));
+    const pathParts = best.path.split('.');
+    if (pathParts[0].startsWith('components')) {
+      // Sum all components using this sub-field
+      const subField = pathParts[1];
+      if (Array.isArray(item.components)) {
+        const sum = item.components.reduce((s, c) => s + Number(c?.[subField] ?? 0), 0);
+        if (sum > 0) return normaliseRate(sum);
+      }
+    } else {
+      const val = item[pathParts[0]];
+      if (val != null && Number(val) !== 0) return normaliseRate(Number(val));
     }
   }
 
-  // 3. If we have the schema, look for any numeric field not in a blocklist
-  if (schemaProps) {
-    const blocklist = new Set([
-      'exchangeRate','withholdingTaxRate','withholdingTaxAmount',
-      'timestamp','id','type','discountPercentage'
-    ]);
-    for (const [field, def] of Object.entries(schemaProps)) {
-      if (blocklist.has(field)) continue;
-      const t = def?.type;
-      if ((t === 'number' || t === 'integer') && item[field] != null && Number(item[field]) !== 0) {
-        return normaliseRate(Number(item[field]));
+  // Fallback: known field names
+  const known = ['rate','taxRate','percentage','ratePercentage','taxPercentage','percent','value'];
+  for (const f of known) {
+    if (item[f] != null && Number(item[f]) !== 0) return normaliseRate(Number(item[f]));
+  }
+
+  // Fallback: components[]
+  if (Array.isArray(item.components) && item.components.length > 0) {
+    for (const f of known) {
+      const sum = item.components.reduce((s, c) => s + Number(c?.[f] ?? 0), 0);
+      if (sum > 0) return normaliseRate(sum);
+    }
+    // Try any numeric field in first component
+    const first = item.components[0];
+    if (first) {
+      for (const [k, v] of Object.entries(first)) {
+        if (typeof v === 'number' && v > 0 && v <= 100) return normaliseRate(v);
       }
     }
   }
 
-  // 4. Last resort: walk all numeric fields on the item itself
-  for (const [field, val] of Object.entries(item)) {
-    if (typeof val !== 'number' || val === 0) continue;
-    if (field.toLowerCase().includes('rate') ||
-        field.toLowerCase().includes('percent') ||
-        field.toLowerCase().includes('tax')) {
-      return normaliseRate(val);
+  // Last resort: any numeric field 0 < v ≤ 100 with rate/percent in name
+  for (const [k, v] of Object.entries(item)) {
+    if (typeof v !== 'number' || v <= 0 || v > 100) continue;
+    const kl = k.toLowerCase();
+    if (kl.includes('rate') || kl.includes('percent') || kl.includes('tax')) {
+      return normaliseRate(v);
     }
   }
 
@@ -414,8 +453,7 @@ function extractRate(item, schemaProps) {
 }
 
 function normaliseRate(r) {
-  // If the value looks like a decimal fraction (e.g. 0.17 = 17%), convert to percent.
-  // Rates > 1 are already in percent form.
+  // 0.18 → 18%, but 18 stays 18
   return (r > 0 && r <= 1) ? r * 100 : r;
 }
 
@@ -423,13 +461,13 @@ function normaliseRate(r) {
    buildTaxRateMap
    Returns: { [taxCodeKey]: ratePercent }
 ══════════════════════════════════ */
-function buildTaxRateMap(taxCodesRaw, schemaProps) {
+function buildTaxRateMap(taxCodesRaw, probeResult) {
   const map = {};
   for (const tc of taxCodesRaw) {
     const key  = tc?.key;
     const item = tc?.item;
     if (!key || !item) continue;
-    map[key] = extractRate(item, schemaProps);
+    map[key] = extractRateFromItem(item, probeResult);
   }
   return map;
 }
