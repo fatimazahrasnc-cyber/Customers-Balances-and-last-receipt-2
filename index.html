@@ -290,9 +290,13 @@ async function loadAllRecords() {
     bar.style.width = '15%';
     status.textContent = 'Fetching tax codes…';
 
-    /* Tax codes fetched first — small dataset, needed to resolve rates */
-    const taxCodesRaw = await fetchAllPages('/api4/tax-code-batch', () => {});
-    const taxRateMap  = buildTaxRateMap(taxCodesRaw);
+    /* Tax codes fetched first — small dataset, needed to resolve rates.
+       We also probe the OpenAPI schema to discover the exact rate field name. */
+    const [taxCodesRaw, taxSchema] = await Promise.all([
+      fetchAllPages('/api4/tax-code-batch', () => {}),
+      fetchTaxSchema()
+    ]);
+    const taxRateMap = buildTaxRateMap(taxCodesRaw, taxSchema);
     bar.style.width = '25%';
 
     status.textContent = 'Fetching invoices, receipts & credit notes…';
@@ -322,33 +326,110 @@ async function loadAllRecords() {
 }
 
 /* ══════════════════════════════════
+   fetchTaxSchema
+   Fetches the OpenAPI schema for tax-code-batch
+   to discover which field holds the rate.
+   Returns the properties object or null on failure.
+══════════════════════════════════ */
+async function fetchTaxSchema() {
+  try {
+    const data = await postMessageWithResponse({
+      type:'api-request', method:'GET', path:'/openapi/get-tax-code-batch.json'
+    });
+    // Navigate into the schema: items → item → properties
+    const props =
+      data?.properties?.items?.items?.properties?.item?.properties ||
+      data?.components?.schemas?.TaxCode?.properties ||
+      data?.definitions?.TaxCode?.properties ||
+      null;
+    return props;
+  } catch {
+    return null;
+  }
+}
+
+/* ══════════════════════════════════
+   extractRate
+   Given a tax code item object and an optional
+   schema properties map, finds the rate field.
+
+   Checks all known Manager.io field names and
+   also walks every numeric field on the item.
+
+   Compound codes: item.components[].rate summed.
+
+   Normalises decimal fractions → percent
+   (0.17 → 17, but 17 stays 17).
+══════════════════════════════════ */
+function extractRate(item, schemaProps) {
+  if (!item) return 0;
+
+  // 1. Compound tax codes with components array
+  if (Array.isArray(item.components) && item.components.length > 0) {
+    const sum = item.components.reduce((s, c) => {
+      // Each component may also have varying field names
+      const r = c?.rate ?? c?.taxRate ?? c?.percentage ?? c?.ratePercentage ?? 0;
+      return s + Number(r);
+    }, 0);
+    if (sum !== 0) return normaliseRate(sum);
+  }
+
+  // 2. Known field names, in priority order
+  const candidates = [
+    'rate', 'taxRate', 'percentage', 'ratePercentage',
+    'taxPercentage', 'percent', 'value', 'taxValue'
+  ];
+  for (const field of candidates) {
+    if (item[field] != null && Number(item[field]) !== 0) {
+      return normaliseRate(Number(item[field]));
+    }
+  }
+
+  // 3. If we have the schema, look for any numeric field not in a blocklist
+  if (schemaProps) {
+    const blocklist = new Set([
+      'exchangeRate','withholdingTaxRate','withholdingTaxAmount',
+      'timestamp','id','type','discountPercentage'
+    ]);
+    for (const [field, def] of Object.entries(schemaProps)) {
+      if (blocklist.has(field)) continue;
+      const t = def?.type;
+      if ((t === 'number' || t === 'integer') && item[field] != null && Number(item[field]) !== 0) {
+        return normaliseRate(Number(item[field]));
+      }
+    }
+  }
+
+  // 4. Last resort: walk all numeric fields on the item itself
+  for (const [field, val] of Object.entries(item)) {
+    if (typeof val !== 'number' || val === 0) continue;
+    if (field.toLowerCase().includes('rate') ||
+        field.toLowerCase().includes('percent') ||
+        field.toLowerCase().includes('tax')) {
+      return normaliseRate(val);
+    }
+  }
+
+  return 0;
+}
+
+function normaliseRate(r) {
+  // If the value looks like a decimal fraction (e.g. 0.17 = 17%), convert to percent.
+  // Rates > 1 are already in percent form.
+  return (r > 0 && r <= 1) ? r * 100 : r;
+}
+
+/* ══════════════════════════════════
    buildTaxRateMap
-   Resolves the effective tax rate (%) for
-   each tax code key.
-
-   Manager.io supports:
-     • item.rate                  — simple flat rate
-     • item.taxRate / percentage  — alternate field names
-     • item.components[].rate     — compound/multi-tier codes
-       → effective rate = sum of all component rates
-
    Returns: { [taxCodeKey]: ratePercent }
 ══════════════════════════════════ */
-function buildTaxRateMap(taxCodesRaw) {
+function buildTaxRateMap(taxCodesRaw, schemaProps) {
   const map = {};
   for (const tc of taxCodesRaw) {
     const key  = tc?.key;
     const item = tc?.item;
     if (!key || !item) continue;
-
-    let rate = 0;
-    if (Array.isArray(item.components) && item.components.length > 0) {
-      rate = item.components.reduce((s, c) => s + Number(c?.rate ?? 0), 0);
-    } else if (item.rate        != null) { rate = Number(item.rate);        }
-    else if   (item.taxRate     != null) { rate = Number(item.taxRate);     }
-    else if   (item.percentage  != null) { rate = Number(item.percentage);  }
-
-    map[key] = rate;
+    map[key] = extractRate(item, schemaProps);
   }
   return map;
 }
