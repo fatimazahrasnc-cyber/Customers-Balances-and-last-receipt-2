@@ -19,6 +19,8 @@
     --red:      #ff4d6a;
     --purple:   #b97aff;
     --purple2:  #8a44e0;
+    --teal:     #00cfb4;
+    --teal2:    #009e89;
     --muted:    #4a6480;
     --text:     #d0e8ff;
     --text2:    #8aabb8;
@@ -63,7 +65,7 @@
     border-radius:8px; padding:12px 16px; font-size:13px; margin-bottom:16px;
   }
 
-  .kpi-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); gap:14px; margin-bottom:22px; }
+  .kpi-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(165px,1fr)); gap:14px; margin-bottom:22px; }
   .kpi-card {
     background:var(--surface); border:1px solid var(--border); border-radius:12px;
     padding:16px 18px; position:relative; overflow:hidden;
@@ -77,13 +79,15 @@
   .kpi-card.amber::before  { background:linear-gradient(90deg,#cc8a00,var(--amber)); }
   .kpi-card.red::before    { background:linear-gradient(90deg,#cc2240,var(--red)); }
   .kpi-card.purple::before { background:linear-gradient(90deg,var(--purple2),var(--purple)); }
+  .kpi-card.teal::before   { background:linear-gradient(90deg,var(--teal2),var(--teal)); }
   .kpi-label { font-size:10px; font-family:var(--mono); color:var(--muted); text-transform:uppercase; letter-spacing:1px; margin-bottom:8px; }
-  .kpi-value { font-size:24px; font-weight:800; letter-spacing:-1px; line-height:1.1; }
-  .kpi-value.accent  { color:var(--accent); }
-  .kpi-value.green   { color:var(--green); }
-  .kpi-value.amber   { color:var(--amber); }
-  .kpi-value.red     { color:var(--red); }
-  .kpi-value.purple  { color:var(--purple); }
+  .kpi-value { font-size:22px; font-weight:800; letter-spacing:-1px; line-height:1.1; }
+  .kpi-value.accent { color:var(--accent); }
+  .kpi-value.green  { color:var(--green); }
+  .kpi-value.amber  { color:var(--amber); }
+  .kpi-value.red    { color:var(--red); }
+  .kpi-value.purple { color:var(--purple); }
+  .kpi-value.teal   { color:var(--teal); }
   .kpi-sub { font-size:11px; color:var(--muted); margin-top:5px; font-family:var(--mono); }
 
   .toolbar { display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:16px; }
@@ -128,6 +132,9 @@
     background:var(--surface2); border-bottom:1px solid var(--border); white-space:nowrap;
   }
   thead th.r { text-align:right; }
+  thead th.grp { border-left:1px solid var(--border2); }
+  td.grp { border-left:1px solid rgba(255,255,255,.035); }
+
   tbody tr { border-bottom:1px solid var(--border); transition:background .12s; }
   tbody tr:last-child { border-bottom:none; }
   tbody tr:hover { background:rgba(0,212,255,.035); }
@@ -155,6 +162,14 @@
   .c-amber  { color:var(--amber); }
   .c-muted  { color:var(--muted); }
   .c-purple { color:var(--purple); }
+  .c-teal   { color:var(--teal); }
+
+  .cn-pill {
+    display:inline-block; padding:1px 6px; border-radius:3px;
+    font-size:10px; font-family:var(--mono); font-weight:600;
+    background:rgba(185,122,255,.12); color:var(--purple);
+    border:1px solid rgba(185,122,255,.25);
+  }
 
   .pagination {
     display:flex; align-items:center; justify-content:center;
@@ -173,16 +188,6 @@
   .empty-state { padding:50px 20px; text-align:center; color:var(--muted); }
   .empty-state p { font-size:14px; margin-top:10px; }
 
-  .disc-note { font-size:10px; color:var(--amber); font-family:var(--mono); margin-top:1px; }
-
-  /* Credit note pill */
-  .cn-pill {
-    display:inline-block; padding:1px 6px; border-radius:3px;
-    font-size:10px; font-family:var(--mono); font-weight:600;
-    background:rgba(185,122,255,.12); color:var(--purple);
-    border:1px solid rgba(185,122,255,.25);
-  }
-
   @keyframes fadeUp {
     from { opacity:0; transform:translateY(14px); }
     to   { opacity:1; transform:translateY(0); }
@@ -194,7 +199,7 @@
 <div class="header">
   <div>
     <h1>Accounts <span>Receivable</span> Dashboard</h1>
-    <p>(invoiced after discount) − credit notes − received = AR balance · manager.io</p>
+    <p>net sales + tax − credit notes − received = AR balance · manager.io</p>
   </div>
 </div>
 
@@ -231,7 +236,6 @@ function postMessageWithResponse(message) {
 
 /* ══════════════════════════════════
    fetchAllPages — paginated loader.
-   Follows next_page_token until done.
    DO NOT SIMPLIFY to a single fetch.
 ══════════════════════════════════ */
 async function fetchAllPages(endpoint, onProgress) {
@@ -280,96 +284,177 @@ async function loadAllRecords() {
     status.textContent = 'Fetching customers…';
     const customers = await fetchAllPages('/api4/customer-batch', (n, t) => {
       status.textContent = `Customers · ${n}${t?'/'+t:''} loaded`;
-      bar.style.width = '15%';
+      bar.style.width = '10%';
     });
 
+    bar.style.width = '15%';
+    status.textContent = 'Fetching tax codes…';
+
+    /* Tax codes fetched first — small dataset, needed to resolve rates */
+    const taxCodesRaw = await fetchAllPages('/api4/tax-code-batch', () => {});
+    const taxRateMap  = buildTaxRateMap(taxCodesRaw);
     bar.style.width = '25%';
+
     status.textContent = 'Fetching invoices, receipts & credit notes…';
 
     const [invoices, receipts, creditNotes] = await Promise.all([
       fetchAllPages('/api4/sales-invoice-batch', (n, t) => {
         status.textContent = `Invoices ${n}${t?'/'+t:''} · Receipts & Credit Notes loading…`;
-        if (t) bar.style.width = (25 + Math.round(n/t*40)) + '%';
+        if (t) bar.style.width = (25 + Math.round(n / t * 50)) + '%';
       }),
-      fetchAllPages('/api4/receipt-batch', () => {}),
+      fetchAllPages('/api4/receipt-batch',     () => {}),
       fetchAllPages('/api4/credit-note-batch', () => {})
     ]);
 
-    bar.style.width     = '100%';
-    status.textContent  = `✓ ${customers.length} customers · ${invoices.length} invoices · ${receipts.length} receipts · ${creditNotes.length} credit notes`;
-    btn.textContent     = '↺ Reload';
-    btn.disabled        = false;
+    bar.style.width    = '100%';
+    status.textContent = `✓ ${customers.length} customers · ${invoices.length} invoices · ${receipts.length} receipts · ${creditNotes.length} credit notes · ${taxCodesRaw.length} tax codes`;
+    btn.textContent    = '↺ Reload';
+    btn.disabled       = false;
 
-    render(customers, invoices, receipts, creditNotes);
+    render(customers, invoices, receipts, creditNotes, taxRateMap);
 
   } catch (err) {
-    status.textContent  = '⚠ ' + err.message;
-    btn.textContent     = '↺ Retry';
-    btn.disabled        = false;
+    status.textContent = '⚠ ' + err.message;
+    btn.textContent    = '↺ Retry';
+    btn.disabled       = false;
     app.innerHTML = `<div class="err-box">⚠ ${err.message}<br><small>Make sure this is running inside Manager.io</small></div>`;
   }
 }
 
 /* ══════════════════════════════════
-   invoiceLineAmt
-   Computes the net amount of ONE invoice line,
-   applying discount correctly.
+   buildTaxRateMap
+   Resolves the effective tax rate (%) for
+   each tax code key.
+
+   Manager.io supports:
+     • item.rate                  — simple flat rate
+     • item.taxRate / percentage  — alternate field names
+     • item.components[].rate     — compound/multi-tier codes
+       → effective rate = sum of all component rates
+
+   Returns: { [taxCodeKey]: ratePercent }
 ══════════════════════════════════ */
-function invoiceLineAmt(line) {
+function buildTaxRateMap(taxCodesRaw) {
+  const map = {};
+  for (const tc of taxCodesRaw) {
+    const key  = tc?.key;
+    const item = tc?.item;
+    if (!key || !item) continue;
+
+    let rate = 0;
+    if (Array.isArray(item.components) && item.components.length > 0) {
+      rate = item.components.reduce((s, c) => s + Number(c?.rate ?? 0), 0);
+    } else if (item.rate        != null) { rate = Number(item.rate);        }
+    else if   (item.taxRate     != null) { rate = Number(item.taxRate);     }
+    else if   (item.percentage  != null) { rate = Number(item.percentage);  }
+
+    map[key] = rate;
+  }
+  return map;
+}
+
+/* ══════════════════════════════════
+   invoiceLineNet
+   Net line amount after discount, EXCLUDING tax.
+   Uses pre-computed `total` field when available.
+══════════════════════════════════ */
+function invoiceLineNet(line) {
   if (!line) return 0;
+
+  // Pre-computed total takes priority
+  if (line.total != null && Number(line.total) !== 0) return Number(line.total);
 
   const qty   = Number(line.qty            ?? 0);
   const price = Number(line.salesUnitPrice ?? 0);
   const gross = qty * price;
-
-  // Use pre-computed total when available and non-zero
-  if (line.total != null && Number(line.total) !== 0) {
-    return Number(line.total);
-  }
 
   const discPct = Number(line.discountPercentage ?? 0);
   const discAmt = Number(line.discountAmount     ?? 0);
 
   if (discPct !== 0) return gross * (1 - discPct / 100);
   if (discAmt !== 0) return gross - discAmt;
-
   return gross;
 }
 
-/* Total value of one invoice (sum of all lines after discount) */
-function invoiceTotal(item) {
-  return (item?.lines ?? []).reduce((s, l) => s + invoiceLineAmt(l), 0);
+/* ══════════════════════════════════
+   invoiceLineTax
+   Tax amount for ONE line.
+
+   Priority:
+     1. line.taxAmount (pre-computed) if non-zero
+     2. Calculate via taxRateMap:
+        • amountsIncludeTax=false (most common):
+            tax = lineNet × rate/100
+        • amountsIncludeTax=true (tax-inclusive):
+            inclusive_net = lineNet / (1 + rate/100)
+            tax           = lineNet − inclusive_net
+══════════════════════════════════ */
+function invoiceLineTax(line, amountsIncludeTax, taxRateMap) {
+  if (!line) return 0;
+  if (line.taxAmount != null && Number(line.taxAmount) !== 0) return Number(line.taxAmount);
+
+  const taxCodeKey = line.taxCode;
+  if (!taxCodeKey) return 0;
+
+  const rate = taxRateMap[taxCodeKey] ?? 0;
+  if (rate === 0) return 0;
+
+  const lineNet = invoiceLineNet(line);
+
+  if (amountsIncludeTax) {
+    const excl = lineNet / (1 + rate / 100);
+    return lineNet - excl;
+  }
+  return lineNet * (rate / 100);
 }
 
-/* Total value of one credit note (sum of all lines after discount).
-   Credit notes share the same line structure as invoices, so we
-   reuse invoiceLineAmt for each line. */
-function creditNoteTotal(item) {
-  return (item?.lines ?? []).reduce((s, l) => s + invoiceLineAmt(l), 0);
+/* ══════════════════════════════════
+   invoiceTotals / creditNoteTotals
+   Returns { net, tax, gross } for one document.
+   gross = net + tax  (what the customer owes)
+══════════════════════════════════ */
+function invoiceTotals(item, taxRateMap) {
+  if (!item) return { net:0, tax:0, gross:0 };
+  const inclTax = item.amountsIncludeTax ?? false;
+  let net = 0, tax = 0;
+  for (const line of (item.lines ?? [])) {
+    const lineTax = invoiceLineTax(line, inclTax, taxRateMap);
+    const lineNet = invoiceLineNet(line);
+    if (inclTax) {
+      net += lineNet - lineTax;   // back out tax from inclusive amount
+    } else {
+      net += lineNet;
+    }
+    tax += lineTax;
+  }
+  return { net, tax, gross: net + tax };
 }
 
-/* Total cash received from one receipt (sum of line amounts) */
+const creditNoteTotals = invoiceTotals; // same structure
+
+/* Total cash received from one receipt */
 function receiptLineTotal(item) {
   return (item?.lines ?? []).reduce((s, l) => s + Number(l?.amount ?? 0), 0);
 }
 
 /* ══════════════════════════════════
    buildCustomerMap
-   Aggregates per customer:
-     invoiced          — total after discount
-     creditNoted       — total credit notes issued
-     netInvoiced       — invoiced − creditNoted
-     totalReceived     — total cash received
-     balance           — netInvoiced − received
-     latestReceipt*    — most recent receipt info
-══════════════════════════════════ */
-function buildCustomerMap(invoices, receipts, creditNotes) {
-  const map = {};
+   Per-customer aggregates:
 
+   invoicedNet     — sum of line nets (after discount, excl. tax)
+   invoicedTax     — sum of invoice tax
+   invoicedGross   — invoicedNet + invoicedTax
+   creditNet/Tax/Gross — same for credit notes
+   netInvoiced     — invoicedGross − creditGross
+   totalReceived   — cash in
+   balance         — netInvoiced − totalReceived
+══════════════════════════════════ */
+function buildCustomerMap(invoices, receipts, creditNotes, taxRateMap) {
+  const map = {};
   const ensure = id => {
     if (!map[id]) map[id] = {
-      invoiced:0,      invoiceCount:0,
-      creditNoted:0,   creditNoteCount:0,
+      invoicedNet:0, invoicedTax:0, invoicedGross:0, invoiceCount:0,
+      creditNet:0,   creditTax:0,   creditGross:0,   creditNoteCount:0,
       netInvoiced:0,
       totalReceived:0, receiptCount:0,
       balance:0,
@@ -381,17 +466,22 @@ function buildCustomerMap(invoices, receipts, creditNotes) {
   for (const inv of invoices) {
     const custId = inv?.item?.customer;
     if (!custId) continue;
+    const { net, tax, gross } = invoiceTotals(inv?.item, taxRateMap);
     const e = ensure(custId);
-    e.invoiced     += invoiceTotal(inv?.item);
-    e.invoiceCount += 1;
+    e.invoicedNet   += net;
+    e.invoicedTax   += tax;
+    e.invoicedGross += gross;
+    e.invoiceCount  += 1;
   }
 
   for (const cn of creditNotes) {
     const custId = cn?.item?.customer;
     if (!custId) continue;
-    const amount = creditNoteTotal(cn?.item);
+    const { net, tax, gross } = creditNoteTotals(cn?.item, taxRateMap);
     const e = ensure(custId);
-    e.creditNoted     += amount;
+    e.creditNet       += net;
+    e.creditTax       += tax;
+    e.creditGross     += gross;
     e.creditNoteCount += 1;
   }
 
@@ -401,10 +491,9 @@ function buildCustomerMap(invoices, receipts, creditNotes) {
     const amount = receiptLineTotal(rec?.item);
     const date   = rec?.item?.date ?? null;
     const ref    = rec?.item?.reference ?? rec?.item?.text ?? '';
-    const e      = ensure(custId);
+    const e = ensure(custId);
     e.totalReceived += amount;
     e.receiptCount  += 1;
-
     if (date && (!e.latestReceiptDate || new Date(date) > new Date(e.latestReceiptDate))) {
       e.latestReceiptDate   = date;
       e.latestReceiptAmount = amount;
@@ -413,16 +502,14 @@ function buildCustomerMap(invoices, receipts, creditNotes) {
   }
 
   for (const id of Object.keys(map)) {
-    map[id].netInvoiced = map[id].invoiced - map[id].creditNoted;
-    map[id].balance     = map[id].netInvoiced - map[id].totalReceived;
+    map[id].netInvoiced = map[id].invoicedGross - map[id].creditGross;
+    map[id].balance     = map[id].netInvoiced   - map[id].totalReceived;
   }
 
   return map;
 }
 
-/* ══════════════════════════════════
-   Helpers
-══════════════════════════════════ */
+/* ══════════════════════════════════ Helpers ══════════════════════════════════ */
 const fmtN = (v, d=2) =>
   Number(v ?? 0).toLocaleString(undefined, { minimumFractionDigits:d, maximumFractionDigits:d });
 
@@ -435,9 +522,7 @@ const fmtDate = v => {
 const esc = s => String(s ?? '')
   .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 
-/* ══════════════════════════════════
-   App state
-══════════════════════════════════ */
+/* ══════════════════════════════════ App state ══════════════════════════════════ */
 let _enriched   = [];
 let _filtered   = [];
 let _query      = '';
@@ -447,11 +532,8 @@ let _filterMode = 'all';
 let _currentPg  = 1;
 const PAGE_SIZE = 20;
 
-/* ══════════════════════════════════
-   render — entry point
-══════════════════════════════════ */
-function render(customers, invoices, receipts, creditNotes) {
-  const custMap = buildCustomerMap(invoices, receipts, creditNotes);
+function render(customers, invoices, receipts, creditNotes, taxRateMap) {
+  const custMap = buildCustomerMap(invoices, receipts, creditNotes, taxRateMap);
   _enriched = customers.map(c => ({ ...c, _ar: custMap[c?.key] ?? null }));
   applyAndRender();
 }
@@ -474,16 +556,17 @@ function applyAndRender() {
   data.sort((a, b) => {
     let va, vb;
     switch (_sortBy) {
-      case 'name':        va=(a?.item?.name||'').toLowerCase(); vb=(b?.item?.name||'').toLowerCase(); break;
-      case 'code':        va=(a?.item?.code||'');               vb=(b?.item?.code||'');               break;
-      case 'balance':     va=a._ar?.balance       ??-Infinity;  vb=b._ar?.balance       ??-Infinity;  break;
-      case 'invoiced':    va=a._ar?.netInvoiced   ??-Infinity;  vb=b._ar?.netInvoiced   ??-Infinity;  break;
-      case 'received':    va=a._ar?.totalReceived ??-Infinity;  vb=b._ar?.totalReceived ??-Infinity;  break;
-      case 'credited':    va=a._ar?.creditNoted   ??-Infinity;  vb=b._ar?.creditNoted   ??-Infinity;  break;
+      case 'name':       va=(a?.item?.name||'').toLowerCase(); vb=(b?.item?.name||'').toLowerCase(); break;
+      case 'code':       va=(a?.item?.code||'');               vb=(b?.item?.code||'');               break;
+      case 'balance':    va=a._ar?.balance       ??-Infinity;  vb=b._ar?.balance       ??-Infinity;  break;
+      case 'invoiced':   va=a._ar?.invoicedNet   ??-Infinity;  vb=b._ar?.invoicedNet   ??-Infinity;  break;
+      case 'tax':        va=a._ar?.invoicedTax   ??-Infinity;  vb=b._ar?.invoicedTax   ??-Infinity;  break;
+      case 'credited':   va=a._ar?.creditGross   ??-Infinity;  vb=b._ar?.creditGross   ??-Infinity;  break;
+      case 'received':   va=a._ar?.totalReceived ??-Infinity;  vb=b._ar?.totalReceived ??-Infinity;  break;
       case 'latest_date':
         va=a._ar?.latestReceiptDate ? new Date(a._ar.latestReceiptDate).getTime() : -Infinity;
         vb=b._ar?.latestReceiptDate ? new Date(b._ar.latestReceiptDate).getTime() : -Infinity; break;
-      default:            va=(a?.item?.name||'').toLowerCase(); vb=(b?.item?.name||'').toLowerCase();
+      default: va=(a?.item?.name||'').toLowerCase(); vb=(b?.item?.name||'').toLowerCase();
     }
     if (va < vb) return _sortDir==='asc' ? -1 :  1;
     if (va > vb) return _sortDir==='asc' ?  1 : -1;
@@ -503,15 +586,16 @@ function renderUI() {
     return;
   }
 
-  const total           = _enriched.length;
-  const activeCount     = _enriched.filter(c => !c?.item?.inactive).length;
-  const totalInvoiced   = _enriched.reduce((s,c) => s + (c._ar?.invoiced      ?? 0), 0);
-  const totalCredited   = _enriched.reduce((s,c) => s + (c._ar?.creditNoted   ?? 0), 0);
-  const totalNetInvoiced= _enriched.reduce((s,c) => s + (c._ar?.netInvoiced   ?? 0), 0);
-  const totalReceived   = _enriched.reduce((s,c) => s + (c._ar?.totalReceived ?? 0), 0);
-  const totalBalance    = totalNetInvoiced - totalReceived;
-  const withBalance     = _enriched.filter(c => (c._ar?.balance ?? 0) > 0.005).length;
-  const withCreditNotes = _enriched.filter(c => (c._ar?.creditNoteCount ?? 0) > 0).length;
+  const total              = _enriched.length;
+  const activeCount        = _enriched.filter(c => !c?.item?.inactive).length;
+  const totalInvoicedNet   = _enriched.reduce((s,c) => s + (c._ar?.invoicedNet   ?? 0), 0);
+  const totalInvoicedTax   = _enriched.reduce((s,c) => s + (c._ar?.invoicedTax   ?? 0), 0);
+  const totalInvoicedGross = _enriched.reduce((s,c) => s + (c._ar?.invoicedGross ?? 0), 0);
+  const totalCredited      = _enriched.reduce((s,c) => s + (c._ar?.creditGross   ?? 0), 0);
+  const totalReceived      = _enriched.reduce((s,c) => s + (c._ar?.totalReceived ?? 0), 0);
+  const totalBalance       = _enriched.reduce((s,c) => s + (c._ar?.balance       ?? 0), 0);
+  const withBalance        = _enriched.filter(c => (c._ar?.balance ?? 0) > 0.005).length;
+  const withCreditNotes    = _enriched.filter(c => (c._ar?.creditNoteCount ?? 0) > 0).length;
 
   const start    = (_currentPg - 1) * PAGE_SIZE;
   const pageRows = _filtered.slice(start, start + PAGE_SIZE);
@@ -526,14 +610,19 @@ function renderUI() {
         <div class="kpi-sub">${activeCount} active · ${total-activeCount} inactive</div>
       </div>
       <div class="kpi-card amber">
-        <div class="kpi-label">Total Invoiced (gross)</div>
-        <div class="kpi-value amber">${fmtN(totalInvoiced)}</div>
-        <div class="kpi-sub">after line discounts, before credit notes</div>
+        <div class="kpi-label">Net Sales (excl. tax)</div>
+        <div class="kpi-value amber">${fmtN(totalInvoicedNet)}</div>
+        <div class="kpi-sub">after discounts · before tax</div>
+      </div>
+      <div class="kpi-card teal">
+        <div class="kpi-label">Tax on Invoices</div>
+        <div class="kpi-value teal">${fmtN(totalInvoicedTax)}</div>
+        <div class="kpi-sub">gross total: ${fmtN(totalInvoicedGross)}</div>
       </div>
       <div class="kpi-card purple">
         <div class="kpi-label">Total Credit Notes</div>
         <div class="kpi-value purple">${fmtN(totalCredited)}</div>
-        <div class="kpi-sub">${withCreditNotes} customers with credit notes</div>
+        <div class="kpi-sub">${withCreditNotes} customers · incl. tax</div>
       </div>
       <div class="kpi-card green">
         <div class="kpi-label">Total Received</div>
@@ -557,14 +646,15 @@ function renderUI() {
           value="${esc(_query)}" oninput="onSearch(this.value)">
       </div>
       <select class="sort-select" onchange="onSort(this.value)">
-        <option value="balance"     ${_sortBy==='balance'    &&_sortDir==='desc'?'selected':''}>Balance (highest)</option>
-        <option value="balance_a"   ${_sortBy==='balance'    &&_sortDir==='asc' ?'selected':''}>Balance (lowest)</option>
-        <option value="name"        ${_sortBy==='name'       &&_sortDir==='asc' ?'selected':''}>Name A → Z</option>
-        <option value="name_d"      ${_sortBy==='name'       &&_sortDir==='desc'?'selected':''}>Name Z → A</option>
-        <option value="invoiced"    ${_sortBy==='invoiced'                      ?'selected':''}>Net Invoiced ↓</option>
-        <option value="credited"    ${_sortBy==='credited'                      ?'selected':''}>Credit Notes ↓</option>
-        <option value="received"    ${_sortBy==='received'                      ?'selected':''}>Received ↓</option>
-        <option value="latest_date" ${_sortBy==='latest_date'                   ?'selected':''}>Latest Receipt ↓</option>
+        <option value="balance"     ${_sortBy==='balance'  &&_sortDir==='desc'?'selected':''}>Balance (highest)</option>
+        <option value="balance_a"   ${_sortBy==='balance'  &&_sortDir==='asc' ?'selected':''}>Balance (lowest)</option>
+        <option value="name"        ${_sortBy==='name'     &&_sortDir==='asc' ?'selected':''}>Name A → Z</option>
+        <option value="name_d"      ${_sortBy==='name'     &&_sortDir==='desc'?'selected':''}>Name Z → A</option>
+        <option value="invoiced"    ${_sortBy==='invoiced'                    ?'selected':''}>Net Sales ↓</option>
+        <option value="tax"         ${_sortBy==='tax'                         ?'selected':''}>Tax ↓</option>
+        <option value="credited"    ${_sortBy==='credited'                    ?'selected':''}>Credit Notes ↓</option>
+        <option value="received"    ${_sortBy==='received'                    ?'selected':''}>Received ↓</option>
+        <option value="latest_date" ${_sortBy==='latest_date'                 ?'selected':''}>Latest Receipt ↓</option>
       </select>
       <button class="filter-btn ${_filterMode==='all'      ?'active':''}" onclick="setFilter('all')">All</button>
       <button class="filter-btn ${_filterMode==='balance'  ?'active':''}" onclick="setFilter('balance')">Outstanding</button>
@@ -590,12 +680,14 @@ function renderUI() {
               <th>Customer</th>
               <th>Code</th>
               <th>Status</th>
-              <th class="r">Invoiced<br><span style="font-weight:400;opacity:.6">(after discount)</span></th>
-              <th class="r">Credit Notes</th>
-              <th class="r">Net Invoiced</th>
-              <th class="r">Total Received</th>
+              <th class="r grp">Net Sales<br><span style="font-weight:400;opacity:.6">(excl. tax)</span></th>
+              <th class="r">Tax</th>
+              <th class="r">Gross Invoiced<br><span style="font-weight:400;opacity:.6">(net + tax)</span></th>
+              <th class="r grp">Credit Notes<br><span style="font-weight:400;opacity:.6">(incl. tax)</span></th>
+              <th class="r grp">Net Invoiced<br><span style="font-weight:400;opacity:.6">(gross − credits)</span></th>
+              <th class="r">Received</th>
               <th class="r">AR Balance</th>
-              <th class="r">Latest Receipt</th>
+              <th class="r grp">Latest Receipt</th>
             </tr>
           </thead>
           <tbody>
@@ -605,17 +697,19 @@ function renderUI() {
               const inactive = c?.item?.inactive ?? false;
               const ar       = c._ar;
 
-              const invoiced   = ar?.invoiced        ?? 0;
-              const credited   = ar?.creditNoted     ?? 0;
-              const netInv     = ar?.netInvoiced      ?? 0;
-              const received   = ar?.totalReceived   ?? 0;
-              const balance    = ar?.balance         ?? 0;
-              const recDate    = ar?.latestReceiptDate   ?? null;
-              const recAmt     = ar?.latestReceiptAmount ?? 0;
-              const recRef     = ar?.latestReceiptRef    ?? '';
-              const recCount   = ar?.receiptCount        ?? 0;
-              const invCount   = ar?.invoiceCount        ?? 0;
-              const cnCount    = ar?.creditNoteCount     ?? 0;
+              const invNet   = ar?.invoicedNet   ?? 0;
+              const invTax   = ar?.invoicedTax   ?? 0;
+              const invGross = ar?.invoicedGross ?? 0;
+              const cnGross  = ar?.creditGross   ?? 0;
+              const netInv   = ar?.netInvoiced   ?? 0;
+              const received = ar?.totalReceived ?? 0;
+              const balance  = ar?.balance       ?? 0;
+              const recDate  = ar?.latestReceiptDate   ?? null;
+              const recAmt   = ar?.latestReceiptAmount ?? 0;
+              const recRef   = ar?.latestReceiptRef    ?? '';
+              const recCount = ar?.receiptCount   ?? 0;
+              const invCount = ar?.invoiceCount   ?? 0;
+              const cnCount  = ar?.creditNoteCount?? 0;
 
               const statusBadge = inactive
                 ? '<span class="badge badge-inactive">Inactive</span>'
@@ -634,10 +728,14 @@ function renderUI() {
 
               const cnCell = cnCount > 0
                 ? `<div style="display:flex;flex-direction:column;align-items:flex-end;gap:3px">
-                     <span class="c-purple">${fmtN(credited)}</span>
+                     <span class="c-purple">${fmtN(cnGross)}</span>
                      <span class="cn-pill">${cnCount} note${cnCount>1?'s':''}</span>
                    </div>`
                 : `<span class="c-muted">—</span>`;
+
+              const taxCell = invCount > 0 && invTax !== 0
+                ? `<span class="c-teal">${fmtN(invTax)}</span>`
+                : `<span class="c-muted">${invCount>0?'0.00':'—'}</span>`;
 
               const recCell = recDate
                 ? `<div class="rec-cell">
@@ -655,12 +753,14 @@ function renderUI() {
                 </td>
                 <td class="dim">${esc(code)}</td>
                 <td>${statusBadge}</td>
-                <td class="r">${invCount>0?`<span class="c-amber">${fmtN(invoiced)}</span>`:'<span class="c-muted">—</span>'}</td>
-                <td class="r">${cnCell}</td>
-                <td class="r">${invCount>0?`<span class="${credited>0?'c-amber':''}">${fmtN(netInv)}</span>`:'<span class="c-muted">—</span>'}</td>
+                <td class="r grp">${invCount>0?`<span class="c-amber">${fmtN(invNet)}</span>`:'<span class="c-muted">—</span>'}</td>
+                <td class="r">${taxCell}</td>
+                <td class="r">${invCount>0?`<span>${fmtN(invGross)}</span>`:'<span class="c-muted">—</span>'}</td>
+                <td class="r grp">${cnCell}</td>
+                <td class="r grp">${invCount>0?`<span class="${cnCount>0?'c-amber':''}">${fmtN(netInv)}</span>`:'<span class="c-muted">—</span>'}</td>
                 <td class="r">${recCount>0?`<span class="c-green">${fmtN(received)}</span>`:'<span class="c-muted">—</span>'}</td>
                 <td class="r">${balCell}</td>
-                <td class="r">${recCell}</td>
+                <td class="r grp">${recCell}</td>
               </tr>`;
             }).join('')}
           </tbody>
